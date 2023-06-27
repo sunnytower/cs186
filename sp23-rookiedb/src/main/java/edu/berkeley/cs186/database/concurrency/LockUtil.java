@@ -41,9 +41,50 @@ public class LockUtil {
         LockType effectiveLockType = lockContext.getEffectiveLockType(transaction);
         LockType explicitLockType = lockContext.getExplicitLockType(transaction);
 
-        // TODO(proj4_part2): implement
-        return;
+        if (LockType.substitutable(effectiveLockType, requestType)) {
+            return;
+        }
+        if (effectiveLockType.equals(LockType.IX) && requestType.equals(LockType.S)) {
+            lockContext.promote(transaction, LockType.SIX);
+            return;
+        }
+        if (explicitLockType.isIntent()) {
+            lockContext.escalate(transaction);
+            LockType afterEscalateLockType = lockContext.getEffectiveLockType(transaction);
+
+            if (afterEscalateLockType == requestType || requestType.equals(LockType.S)) {
+                return;
+            }
+        }
+
+
+        // only S and NL are possible options.
+        if (requestType == LockType.S) {
+            updateAncestor(LockType.IS, parentContext, transaction);
+        } else {
+            updateAncestor(LockType.IX, parentContext, transaction);
+        }
+
+        if (explicitLockType == LockType.NL) {
+            lockContext.acquire(transaction, requestType);
+        } else {
+            lockContext.promote(transaction, requestType);
+        }
+
     }
 
-    // TODO(proj4_part2) add any helper methods you want
+    private static void updateAncestor(LockType lock, LockContext parentContext, TransactionContext transaction) {
+        if (parentContext != null) {
+            updateAncestor(lock, parentContext.parentContext(), transaction);
+            LockType current = parentContext.getExplicitLockType(transaction);
+            if (!LockType.substitutable(current, lock)) {
+                if (current.equals(LockType.NL)) {
+                    parentContext.acquire(transaction, lock);
+                } else {
+                    parentContext.promote(transaction, lock);
+                }
+            }
+        }
+    }
+
 }

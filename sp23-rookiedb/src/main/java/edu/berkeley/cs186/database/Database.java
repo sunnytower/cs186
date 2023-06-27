@@ -39,6 +39,8 @@ import java.util.concurrent.Phaser;
 import java.util.function.Function;
 import java.util.function.UnaryOperator;
 
+import static java.util.Collections.reverse;
+
 /**
  * Database objects keeps track of transactions, tables, and indices
  * and delegates work to its disk manager, buffer manager, lock manager and
@@ -930,8 +932,13 @@ public class Database implements AutoCloseable {
         @Override
         public void close() {
             try {
-                // TODO(proj4_part2)
-                return;
+                TransactionContext transaction = getTransaction();
+                List<Lock> locks = lockManager.getLocks(transaction);
+                reverse(locks);
+                for (Lock lock: locks) {
+                    ResourceName resourceName = lock.name;
+                    LockContext.fromResourceName(lockManager, resourceName).release(transaction);
+                }
             } catch (Exception e) {
                 // There's a chance an error message from your release phase
                 // logic can get suppressed. This guarantees that the stack

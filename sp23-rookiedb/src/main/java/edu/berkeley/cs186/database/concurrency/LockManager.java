@@ -128,12 +128,13 @@ public class LockManager {
          * granted, the transaction that made the request can be unblocked.
          */
         private void processQueue() {
-            Iterator<LockRequest> requests = waitingQueue.iterator();
-            while (requests.hasNext()) {
-                LockRequest current = requests.next();
-                waitingQueue.removeFirst();
-                if (checkCompatible(current.lock.lockType, current.lock.transactionNum)) {
-                    for (Lock releaseLock : current.releasedLocks) {
+            Iterator<LockRequest> request = waitingQueue.iterator();
+            while (request.hasNext()) {
+                LockRequest current = request.next();
+                Lock lock = current.lock;
+                if (checkCompatible(lock.lockType, lock.transactionNum)) {
+                    List<Lock> releaseLocks = current.releasedLocks;
+                    for (Lock releaseLock : releaseLocks) {
                         // release in locks
                         if (resourceEntries.containsKey(releaseLock.name)) {
                             resourceEntries.get(releaseLock.name).locks.remove(releaseLock);
@@ -141,6 +142,7 @@ public class LockManager {
                     }
                     // unblock transaction
                     grantOrUpdateLock(current.lock);
+                    waitingQueue.removeFirst();
                     current.transaction.unblock();
                 } else {
                     break;
@@ -239,13 +241,10 @@ public class LockManager {
             ResourceEntry acquireResource = resourceEntries.get(name);
             if (acquireResource.checkCompatible(lockType, transaction.getTransNum())) {
                 // if compatible, acquire the lock and release resources
-                acquireResource.grantOrUpdateLock(acquireLock);
                 for (Lock releaseLock : releaseLocks) {
-                    if (releaseLock.name.equals(name)) {
-                        continue;
-                    }
                     release(transaction, releaseLock.name);
                 }
+                acquireResource.grantOrUpdateLock(acquireLock);
             } else {
                 shouldBlock = true;
                 acquireResource.addToQueue(new LockRequest(transaction, acquireLock, releaseLocks), true);
@@ -277,7 +276,6 @@ public class LockManager {
         boolean shouldBlock = false;
         synchronized (this) {
             ResourceEntry acquireResource = resourceEntries.getOrDefault(name, new ResourceEntry());
-            List<Lock> resourceLocks = getLocks(name);
             Lock acquireLock = new Lock(name, lockType, transaction.getTransNum());
 
             LockType held = getLockType(transaction, name);
@@ -315,7 +313,7 @@ public class LockManager {
         // You may modify any part of this method.
         synchronized (this) {
             LockType heldLockType = getLockType(transaction, name);
-            if (heldLockType == LockType.NL) {
+            if (heldLockType.equals(LockType.NL)) {
                 throw new NoLockHeldException("no lock held");
             }
             ResourceEntry resourceEntry = resourceEntries.get(name);
