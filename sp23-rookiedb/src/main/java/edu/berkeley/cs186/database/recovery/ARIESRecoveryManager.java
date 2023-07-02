@@ -453,7 +453,37 @@ public class ARIESRecoveryManager implements RecoveryManager {
         Map<Long, Long> chkptDPT = new HashMap<>();
         Map<Long, Pair<Transaction.Status, Long>> chkptTxnTable = new HashMap<>();
 
-        // TODO(proj5): generate end checkpoint record(s) for DPT and transaction table
+        for (Map.Entry<Long, Long> pageNum : dirtyPageTable.entrySet()) {
+            boolean fitsAfterAdd = EndCheckpointLogRecord.fitsInOneRecord(
+                    chkptDPT.size()+1, chkptTxnTable.size());
+
+            if (!fitsAfterAdd) {
+                LogRecord endRecord = new EndCheckpointLogRecord(chkptDPT, chkptTxnTable);
+                logManager.appendToLog(endRecord);
+
+                chkptDPT.clear();
+                chkptTxnTable.clear();
+            }
+
+            chkptDPT.putIfAbsent(pageNum.getKey(), pageNum.getValue());
+        }
+
+
+        for (Map.Entry<Long, TransactionTableEntry> entry : transactionTable.entrySet()) {
+            boolean fitsAfterAdd = EndCheckpointLogRecord.fitsInOneRecord(
+                    chkptDPT.size(), chkptTxnTable.size()+1);
+
+            if (!fitsAfterAdd) {
+                LogRecord endRecord = new EndCheckpointLogRecord(chkptDPT, chkptTxnTable);
+                logManager.appendToLog(endRecord);
+
+                chkptDPT.clear();
+                chkptTxnTable.clear();
+            }
+
+            chkptTxnTable.putIfAbsent(entry.getKey(), new Pair<>(entry.getValue().transaction.getStatus(), entry.getValue().lastLSN));
+        }
+
 
         // Last end checkpoint record
         LogRecord endRecord = new EndCheckpointLogRecord(chkptDPT, chkptTxnTable);
