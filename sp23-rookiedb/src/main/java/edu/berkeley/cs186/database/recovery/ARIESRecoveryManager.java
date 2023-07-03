@@ -146,8 +146,8 @@ public class ARIESRecoveryManager implements RecoveryManager {
         Transaction current = entry.transaction;
         if (current.getStatus().equals(Transaction.Status.ABORTING)) {
             // get masterRecordLSN
-            LogRecord masterRecord = logManager.fetchLogRecord(0L);
-            rollbackToLSN(transNum, masterRecord.getLSN());
+            MasterLogRecord masterRecord = (MasterLogRecord) logManager.fetchLogRecord(0L);
+            rollbackToLSN(transNum, masterRecord.lastCheckpointLSN);
         }
         current.setStatus(Transaction.Status.COMPLETE);
         LogRecord endRecord = new EndTransactionLogRecord(transNum, entry.lastLSN);
@@ -455,7 +455,7 @@ public class ARIESRecoveryManager implements RecoveryManager {
 
         for (Map.Entry<Long, Long> pageNum : dirtyPageTable.entrySet()) {
             boolean fitsAfterAdd = EndCheckpointLogRecord.fitsInOneRecord(
-                    chkptDPT.size()+1, chkptTxnTable.size());
+                    chkptDPT.size() + 1, chkptTxnTable.size());
 
             if (!fitsAfterAdd) {
                 LogRecord endRecord = new EndCheckpointLogRecord(chkptDPT, chkptTxnTable);
@@ -471,7 +471,7 @@ public class ARIESRecoveryManager implements RecoveryManager {
 
         for (Map.Entry<Long, TransactionTableEntry> entry : transactionTable.entrySet()) {
             boolean fitsAfterAdd = EndCheckpointLogRecord.fitsInOneRecord(
-                    chkptDPT.size(), chkptTxnTable.size()+1);
+                    chkptDPT.size(), chkptTxnTable.size() + 1);
 
             if (!fitsAfterAdd) {
                 LogRecord endRecord = new EndCheckpointLogRecord(chkptDPT, chkptTxnTable);
@@ -595,8 +595,98 @@ public class ARIESRecoveryManager implements RecoveryManager {
         long LSN = masterRecord.lastCheckpointLSN;
         // Set of transactions that have completed
         Set<Long> endedTransactions = new HashSet<>();
-        // TODO(proj5): implement
-        return;
+
+        Iterator<LogRecord> iter = logManager.scanFrom(LSN);
+        while (iter.hasNext()) {
+            LogRecord logRecord = iter.next();
+            // transaction-related op
+            if (logRecord.getTransNum().isPresent()) {
+                long transNum = logRecord.getTransNum().get();
+                if (transactionTable.containsKey(transNum)) {
+                    // update lastLSN
+                } else {
+                    // add record to transactionTable
+                    Transaction newTxn = newTransaction.apply(transNum);
+                    startTransaction(newTransaction.apply(transNum));
+                }
+                transactionTable.get(transNum).lastLSN = logRecord.getLSN();
+            }
+            // page-related op
+            if (logRecord.getPageNum().isPresent()) {
+                long pageNum = logRecord.getPageNum().get();
+                if (logRecord instanceof UpdatePageLogRecord || logRecord instanceof UndoUpdatePageLogRecord) {
+                    dirtyPage(pageNum, logRecord.getLSN());
+                } else if (logRecord instanceof FreePageLogRecord || logRecord instanceof UndoAllocPageLogRecord) {
+                    dirtyPageTable.remove(pageNum);
+                }
+            }
+            // transaction status op
+            if (logRecord instanceof CommitTransactionLogRecord || logRecord instanceof AbortTransactionLogRecord || logRecord instanceof EndTransactionLogRecord) {
+                if (logRecord instanceof CommitTransactionLogRecord) {
+                    transactionTable.get(logRecord.getTransNum().get()).transaction.setStatus(Transaction.Status.COMMITTING);
+                } else if (logRecord instanceof AbortTransactionLogRecord) {
+                    transactionTable.get(logRecord.getTransNum().get()).transaction.setStatus(Transaction.Status.RECOVERY_ABORTING);
+                } else {
+                    long transNum = logRecord.getTransNum().get();
+                    transactionTable.get(transNum).transaction.cleanup();
+                    transactionTable.get(transNum).transaction.setStatus(Transaction.Status.COMPLETE);
+                    endedTransactions.add(transNum);
+                    transactionTable.remove(transNum);
+                }
+            }
+            // endCheckPoint record
+            if (logRecord instanceof EndCheckpointLogRecord) {
+                Map<Long, Long> endDPT = logRecord.getDirtyPageTable();
+                Map<Long, Pair<Transaction.Status, Long>> endTxnTable = logRecord.getTransactionTable();
+
+                for (Long pageNum : endDPT.keySet()) {
+                    dirtyPageTable.put(pageNum, endDPT.get(pageNum));
+                }
+
+                for (long transNum : endTxnTable.keySet()) {
+                    if (endedTransactions.contains(transNum)) {
+                        continue;
+                    } else {
+                        if (!transactionTable.containsKey(transNum)) {
+                            Transaction newTxn = newTransaction.apply(transNum);
+                            newTxn.setStatus(endTxnTable.get(transNum).getFirst());
+                            TransactionTableEntry newTxntableEntry = new TransactionTableEntry(newTxn);
+                            newTxntableEntry.lastLSN = endTxnTable.get(transNum).getSecond();
+                            transactionTable.put(transNum, newTxntableEntry);
+                        }
+
+                        TransactionTableEntry entry = transactionTable.get(transNum);
+                        long currentLSN = entry.lastLSN;
+                        long logLSN = endTxnTable.get(transNum).getSecond();
+                        transactionTable.get(transNum).lastLSN = Math.max(currentLSN, logLSN);
+                        Transaction.Status currentStatus = entry.transaction.getStatus();
+                        if (currentStatus.compareTo(endTxnTable.get(transNum).getFirst()) < 0) {
+                            entry.transaction.setStatus(endTxnTable.get(transNum).getFirst());
+                        }
+                        // if aborting set recovery aborting
+                        if (entry.transaction.getStatus().equals(Transaction.Status.ABORTING)) {
+                            entry.transaction.setStatus(Transaction.Status.RECOVERY_ABORTING);
+                        }
+                    }
+                }
+
+
+            }
+        }
+
+        for (long transNum : transactionTable.keySet()) {
+            TransactionTableEntry entry = transactionTable.get(transNum);
+            if (entry.transaction.getStatus().equals(Transaction.Status.COMMITTING)) {
+                entry.transaction.cleanup();
+                entry.transaction.setStatus(Transaction.Status.COMPLETE);
+                appendAndUpdate(new EndTransactionLogRecord(transNum, entry.lastLSN), transNum);
+                transactionTable.remove(transNum);
+            }
+            if (entry.transaction.getStatus().equals(Transaction.Status.RUNNING)) {
+                entry.transaction.setStatus(Transaction.Status.RECOVERY_ABORTING);
+                appendAndUpdate(new AbortTransactionLogRecord(transNum, entry.lastLSN), transNum);
+            }
+        }
     }
 
     /**
